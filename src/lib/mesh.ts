@@ -39,6 +39,8 @@ export function generateMesh(api: ManifoldToplevel, source: Project): MeshResult
       const d = project.definitions.find(d => d.id === i.definitionId)!
       const c = i.fitClearance ?? d.fitClearance ?? s.fitClearance, depth = i.recessDepth ?? d.recessDepth
       const top = s.ridgeHeight + s.thickness
+      // Recess cutters may overhang the outline. Subtracting from the plate
+      // naturally clips them at its edges and ignores portions outside it.
       if (depth > 0) subtract.push(extrude(polygon(rect(0, 0, d.width, d.height, c).map(p => transform(p, i))), depth + epsilon, top - depth))
       for (const z of d.zones) if (z.mode !== 'clearance' && (z.mode === 'cut' || z.depth > 0)) {
         let shape = z.shape === 'circle' ? circle(z, (z.radius ?? z.width / 2) + c) : polygon(z.shape === 'polygon' ? zonePolygon(z) : rect(z.x, z.y, z.width, z.height, c))

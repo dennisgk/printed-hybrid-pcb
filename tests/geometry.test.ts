@@ -15,6 +15,19 @@ function padProject() {
 }
 
 describe('geometry and connectivity', () => {
+  it('allows component recesses to overhang while enforcing pin, pad, and trace edge clearance at export', () => {
+    const p = exampleProject(), instance = p.instances[0]
+    instance.x = -10 // Body and USB recess overhang; pins and landing pads remain inside.
+    expect(validateProject(p, { forExport: true })).toEqual([])
+    instance.x = -18.5
+    const outside = validateProject(p, { forExport: true })
+    expect(outside.some(i => i.message.includes('pin hole is outside'))).toBe(true)
+    expect(outside.some(i => i.message === 'Pin landing pad violates board edge clearance.')).toBe(true)
+    instance.x = -10
+    p.traces[0].vertices[0] = { x: 44, y: .5 }
+    expect(validateProject(p, { forExport: true }).some(i => i.message === 'Trace violates board edge clearance.')).toBe(true)
+    expect(validateProject(p)).toEqual([]) // Boundary errors are still deferred until export.
+  })
   it('sizes square pad sides using the hole side plus margin and rotates their corners with the component', () => {
     const p = padProject(), pin = p.definitions[0].pins[0], instance = p.instances[0]
     Object.assign(p.board.settings, { landingDiameter: .1, holeAllowance: .2, landingMargin: .4 })

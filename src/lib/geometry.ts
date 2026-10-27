@@ -186,7 +186,6 @@ export function validateProject(p: Project, options: { forExport?: boolean } = {
     if (!d) { add(i.id, `${i.name}: missing component definition.`); continue }
     const c = i.fitClearance ?? d.fitClearance ?? s.fitClearance, depth = i.recessDepth ?? d.recessDepth
     const poly = bodyPolygon(d, i, c); bodies.push({ instance: i, poly })
-    if (edges(poly).some(([a, b]) => !containsSegment(a, b, s.edgeClearance))) add(i.id, `${i.name}: component recess must fit inside the board edge clearance.`)
     if (depth > s.thickness - s.minFloor + EPS) add(i.id, `${i.name}: recess leaves less than the minimum floor thickness.`)
     for (const z of d.zones) {
       const localPolygon = zonePolygon(z), error = outlineError(localPolygon)

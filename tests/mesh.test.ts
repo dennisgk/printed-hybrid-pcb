@@ -24,6 +24,22 @@ function containsMaterial(mesh: MeshResult, point: { x: number; y: number }, z: 
 }
 
 describe('manufacturing meshes', () => {
+  it.each(['rectangle', 'circle', 'polygon'] as const)('clips overhanging bodies and %s recess zones to the plate', shape => {
+    const p = createProject('Overhang'); p.board.outline = rect(0, 0, 100, 80)
+    const d = { id: id(), name: 'Overhanging board', width: 10, height: 10, recessDepth: 1, fitClearance: 0, pins: [], zones: [{ id: id(), name: 'Overhanging recess', shape, x: shape === 'circle' ? 5 : 0, y: shape === 'circle' ? 25 : 20, width: 10, height: 10, radius: 5, vertices: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], mode: 'recess' as const, depth: .5 }] }
+    const instance = { id: id(), definitionId: d.id, name: 'Board 1', x: -5, y: 20, rotation: 0, recessDepth: null, fitClearance: null }
+    p.definitions.push(d); p.instances.push(instance)
+    expect(validateProject(p, { forExport: true })).toEqual([])
+    const mesh = generateMesh(api, p)
+    const clippedZoneVolume = shape === 'rectangle' ? 25 : shape === 'circle' ? Math.PI * 6.25 : 18.75
+    expect(Math.abs(mesh.volume - (24000 - 50 - clippedZoneVolume))).toBeLessThan(.05)
+    expect(mesh.bounds.min[0]).toBe(0); expect(mesh.bounds.max[0]).toBe(100)
+    expect(mesh.bounds.min[1]).toBe(0); expect(mesh.bounds.max[1]).toBe(80)
+    d.zones[0].x = -100 // A recess entirely off the plate removes nothing.
+    expect(generateMesh(api, p).volume).toBeCloseTo(23950, 3)
+    instance.x = -100
+    expect(generateMesh(api, p).volume).toBeCloseTo(24000, 3)
+  })
   it.each(['none', 'lined'] as const)('matches landing pad and center opening shapes to rotated pins with %s trace cuts', traceCut => {
     const p = createProject('Pad shapes'); p.board.outline = rect(0, 0, 100, 80)
     Object.assign(p.board.settings, { landingDiameter: 4, traceWidth: 1.5, traceCut, traceCutWidth: .8 })
@@ -191,8 +207,8 @@ describe('manufacturing meshes', () => {
     expect([...edges.values()].every(count => count === 2)).toBe(true)
   })
   it('blocks invalid geometry before boolean operations', () => {
-    const p = exampleProject(); p.instances[0].x = -10
-    expect(() => generateMesh(api, p)).toThrow('clearance')
+    const p = exampleProject(); p.instances[0].x = -30
+    expect(() => generateMesh(api, p)).toThrow('pin hole is outside')
   })
   it('blocks through-cuts that divide the plate into disconnected solids', () => {
     const p = createProject('Disconnected'), definitionId = id()

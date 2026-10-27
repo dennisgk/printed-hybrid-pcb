@@ -13,6 +13,8 @@ A Vite, React, TypeScript editor for 3D printed electronics carriers. The design
 
 No application state is persisted in local storage, IndexedDB, or a server. Save JSON downloads the complete project, including component drafts and open tabs. STL generation requires a valid edge-cut boundary; the editor itself is unbounded.
 
+Component bodies and recess zones may overhang the edge-cut boundary. Only the portions of their recesses inside the plate are cut; portions outside are ignored. Pin holes, underside landing pads, and traces must still fit inside the board edge clearance when exporting. Floor thickness, component collisions, and single-layer routing checks continue to apply.
+
 ## Component constraints
 
 The component toolbar has separate constraint controls below a divider:
