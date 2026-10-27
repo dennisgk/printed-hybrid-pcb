@@ -1,9 +1,62 @@
 import { describe, expect, it } from 'vitest'
 import { createProject, id } from '../src/lib/model'
 import { exampleProject } from '../src/lib/example'
-import { anchorPoint, bounds, connectTarget, inside, outlineError, pinHole, pointHoleDistance, rect, segmentHoleDistance, snap, snapAngle, tracePoints, transform, validateProject, zonePolygon, createPolygonZone, changeZoneShape } from '../src/lib/geometry'
+import { anchorPoint, bounds, connectTarget, inside, landingPads, outlineError, pinHole, pointHoleDistance, rect, segmentHoleDistance, snap, snapAngle, tracePoints, transform, validateProject, zonePolygon, createPolygonZone, changeZoneShape } from '../src/lib/geometry'
+
+function padProject() {
+  const p = createProject('Pad clearance'); p.board.outline = rect(0, 0, 100, 80)
+  Object.assign(p.board.settings, { traceWidth: .2, landingDiameter: 4, separation: .1, edgeClearance: 0, holeAllowance: 0 })
+  const d = { id: id(), name: 'Pins', width: 20, height: 20, recessDepth: 0, fitClearance: 0, zones: [], pins: [{ id: id(), name: 'A', x: 10, y: 10, diameter: .4, color: '#a3e635', shape: 'square' as 'square' | 'circle' }] }
+  const instance = { id: id(), name: 'Pins 1', definitionId: d.id, x: 20, y: 20, rotation: 0, recessDepth: null, fitClearance: null }
+  const end = { id: id(), x: 60, y: 30 }
+  p.definitions.push(d); p.instances.push(instance); p.junctions.push(end)
+  p.traces.push({ id: id(), width: .2, from: { kind: 'pin', instanceId: instance.id, pinId: d.pins[0].id }, to: { kind: 'junction', id: end.id }, vertices: [] })
+  return p
+}
 
 describe('geometry and connectivity', () => {
+  it('sizes square pad sides using the hole side plus margin and rotates their corners with the component', () => {
+    const p = padProject(), pin = p.definitions[0].pins[0], instance = p.instances[0]
+    Object.assign(p.board.settings, { landingDiameter: .1, holeAllowance: .2, landingMargin: .4 })
+    pin.diameter = 2
+    const pad = landingPads(p)[0].pad
+    expect(bounds(pad.polygon!).maxX - bounds(pad.polygon!).minX).toBeCloseTo(2.6)
+    instance.rotation = 31
+    expect(landingPads(p)[0].pad.polygon).toEqual(rect(8.7, 8.7, 2.6, 2.6).map(q => transform(q, instance)))
+    p.board.settings.squarePinBottomFace = 'circular'
+    expect(landingPads(p)[0].pad.polygon).toBeNull()
+    expect(landingPads(p)[0].pad.radius).toBeCloseTo((2.2 * Math.SQRT2 + .4) / 2)
+    expect(pinHole(pin, instance, .2).polygon).not.toBeNull()
+    pin.shape = 'circle'
+    expect(landingPads(p)[0].pad.polygon).toBeNull(); expect(landingPads(p)[0].pad.radius).toBeCloseTo(1.3)
+  })
+  it('detects square-pad corner collisions with other holes and unrelated traces', () => {
+    const p = padProject(), d = p.definitions[0]
+    d.pins.push({ id: id(), name: 'B', x: 11.8, y: 11.8, diameter: .2, color: '#a3e635', shape: 'circle' })
+    expect(validateProject(p).some(i => i.message.includes('too close to another pin hole'))).toBe(true)
+    const a = { id: id(), x: 31.8, y: 31.6 }, b = { id: id(), x: 31.8, y: 31.9 }
+    p.junctions.push(a, b); p.traces.push({ id: id(), width: .1, from: { kind: 'junction', id: a.id }, to: { kind: 'junction', id: b.id }, vertices: [] })
+    expect(validateProject(p).some(i => i.message === 'Trace intersects an unrelated pin landing pad.')).toBe(true)
+    p.board.settings.squarePinBottomFace = 'circular'
+    expect(validateProject(p).some(i => i.message.includes('landing pad'))).toBe(false)
+    expect(d.pins[0].shape).toBe('square')
+    d.pins[0].shape = 'circle'
+    expect(validateProject(p).some(i => i.message.includes('landing pad'))).toBe(false)
+  })
+  it('uses exact square corners for pad-to-pad separation and rotated board edge checks', () => {
+    const p = padProject(), d = p.definitions[0], instance = p.instances[0]
+    const pin = { ...d.pins[0], id: id(), name: 'B', x: 13.8, y: 13.8 }, end = { id: id(), x: 60, y: 33.8 }
+    d.pins.push(pin); p.junctions.push(end)
+    p.traces.push({ id: id(), width: .2, from: { kind: 'pin', instanceId: instance.id, pinId: pin.id }, to: { kind: 'junction', id: end.id }, vertices: [] })
+    expect(validateProject(p).some(i => i.message.includes('Separate pin landing pads'))).toBe(true)
+    d.pins.forEach(pin => { pin.shape = 'circle' })
+    expect(validateProject(p).some(i => i.message.includes('Separate pin landing pads'))).toBe(false)
+    p.traces.pop(); d.pins.pop(); d.pins[0].shape = 'square'; instance.rotation = 45
+    p.board.outline = rect(17.4, 0, 82.6, 80)
+    expect(validateProject(p, { forExport: true }).some(i => i.message === 'Pin landing pad violates board edge clearance.')).toBe(true)
+    d.pins[0].shape = 'circle'
+    expect(validateProject(p, { forExport: true }).some(i => i.message === 'Pin landing pad violates board edge clearance.')).toBe(false)
+  })
   it('centers square holes, adds allowance to their side length, and rotates with the instance', () => {
     const p = exampleProject(), pin = p.definitions[0].pins[0], instance = p.instances[0]
     pin.shape = 'square'; pin.diameter = 2

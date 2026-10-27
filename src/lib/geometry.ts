@@ -25,7 +25,7 @@ export function zonePolygon(z: Zone): Point[] {
 }
 export function createPolygonZone(points: Point[]): Zone {
   const b = bounds(points)
-  return { id: id(), name: 'Clearance zone', shape: 'polygon', x: b.minX, y: b.minY, width: b.maxX - b.minX, height: b.maxY - b.minY, vertices: points.map(p => ({ x: p.x - b.minX, y: p.y - b.minY })), mode: 'clearance', depth: 1 }
+  return { id: id(), name: 'Clearance zone', shape: 'polygon', x: b.minX, y: b.minY, width: b.maxX - b.minX, height: b.maxY - b.minY, vertices: points.map(p => ({ id: id(), x: p.x - b.minX, y: p.y - b.minY })), mode: 'clearance', depth: 1 }
 }
 export function changeZoneShape(z: Zone, shape: ZoneShape) {
   if ((z.shape ?? 'rectangle') === shape) return
@@ -33,7 +33,7 @@ export function changeZoneShape(z: Zone, shape: ZoneShape) {
   z.shape = shape; z.width = w; z.height = h; z.x = b.minX; z.y = b.minY
   delete z.radius; delete z.vertices
   if (shape === 'circle') { z.x += w / 2; z.y += h / 2; z.radius = Math.max(w, h) / 2; z.width = z.height = z.radius * 2 }
-  if (shape === 'polygon') z.vertices = rect(0, 0, w, h)
+  if (shape === 'polygon') z.vertices = rect(0, 0, w, h).map(v => ({ ...v, id: id() }))
 }
 export function resizeZone(z: Zone, key: 'width' | 'height', value: number) {
   if (z.shape === 'polygon' && z.vertices) { const axis = key === 'width' ? 'x' : 'y', scale = value / z[key]; z.vertices = z.vertices.map(v => ({ ...v, [axis]: v[axis] * scale })) }
@@ -44,7 +44,7 @@ export function normalizePolygonZone(z: Zone) {
   const b = bounds(z.vertices)
   z.x += b.minX; z.y += b.minY
   z.width = Math.max(EPS, b.maxX - b.minX); z.height = Math.max(EPS, b.maxY - b.minY)
-  z.vertices = z.vertices.map(v => ({ x: v.x - b.minX, y: v.y - b.minY }))
+  z.vertices = z.vertices.map(v => ({ ...v, x: v.x - b.minX, y: v.y - b.minY }))
 }
 export function projectContentPoints(p: Project): Point[] {
   return [...p.board.outline, ...p.instances.flatMap(i => { const d = p.definitions.find(d => d.id === i.definitionId); return d ? [...bodyPolygon(d, i), ...d.zones.flatMap(z => zonePolygon(z).map(v => transform(v, i)))] : [] }), ...p.traces.flatMap(t => tracePoints(p, t))]
@@ -80,7 +80,6 @@ export function pinHole(pin: Pin, instance: Instance, allowance: number): PinHol
   const side = pin.diameter + allowance
   return { center: transform(pin, instance), radius: side / 2, polygon: pin.shape === 'square' ? rect(pin.x - side / 2, pin.y - side / 2, side, side).map(p => transform(p, instance)) : null }
 }
-export const pinOuterDiameter = (pin: Pin, allowance: number) => (pin.diameter + allowance) * (pin.shape === 'square' ? Math.SQRT2 : 1)
 export function pointPolygonDistance(point: Point, polygon: Point[]) { return inside(point, polygon) ? 0 : Math.min(...edges(polygon).map(([a, b]) => pointSegmentDistance(point, a, b))) }
 export function pointHoleDistance(point: Point, hole: PinHole) { return hole.polygon ? pointPolygonDistance(point, hole.polygon) : Math.max(0, distance(point, hole.center) - hole.radius) }
 export function segmentHoleDistance(a: Point, b: Point, hole: PinHole) {
@@ -120,6 +119,21 @@ export function anchorPoint(p: Project, a: Anchor): Point {
 export function tracePoints(p: Project, t: Trace) { return [anchorPoint(p, t.from), ...t.vertices, anchorPoint(p, t.to)] }
 export function pins(p: Project) {
   return p.instances.flatMap(i => (p.definitions.find(d => d.id === i.definitionId)?.pins ?? []).map(pin => ({ ...transform(pin, i), pin, instance: i, anchor: { kind: 'pin', instanceId: i.id, pinId: pin.id } as Anchor })))
+}
+export function landingPads(p: Project) {
+  const widths = new Map<string, number>(), s = p.board.settings
+  for (const t of p.traces) for (const a of [t.from, t.to]) if (a.kind === 'pin') {
+    const key = anchorKey(a); widths.set(key, Math.max(widths.get(key) ?? 0, t.width))
+  }
+  return pins(p).flatMap(pin => {
+    const width = widths.get(anchorKey(pin.anchor))
+    if (width === undefined) return []
+    const circularBottom = pin.pin.shape === 'square' && s.squarePinBottomFace === 'circular'
+    // A circular pad must surround the square hole's diagonal, as before.
+    const holeSize = (pin.pin.diameter + s.holeAllowance) * (circularBottom ? Math.SQRT2 : 1)
+    const size = Math.max(s.landingDiameter, s.traceWidth, width, holeSize + s.landingMargin)
+    return [{ ...pin, pad: pinHole({ ...pin.pin, shape: circularBottom ? 'circle' : pin.pin.shape, diameter: size }, pin.instance, 0) }]
+  })
 }
 export function snapAngle(start: Point, end: Point, mode: '45' | '90' | 'free'): Point {
   if (mode === 'free') return end
@@ -188,19 +202,21 @@ export function validateProject(p: Project, options: { forExport?: boolean } = {
   const allPins = pins(p).map(pin => ({ ...pin, hole: pinHole(pin.pin, pin.instance, s.holeAllowance) }))
   for (const pin of allPins) {
     const hole = pin.hole
+    if (options.forExport && s.plugHoles === 'slightly-connected') {
+      const coreSide = (hole.radius - s.plugGap) * 2
+      if (coreSide <= EPS) add(pin.instance.id, `${pin.instance.name}, ${pin.pin.name || 'unnamed pin'}: plug gap leaves no plug. Reduce Plug gap per side.`)
+      else if (s.plugTabWidth >= coreSide * (hole.polygon ? 1 : Math.SQRT1_2) - EPS) add(pin.instance.id, `${pin.instance.name}, ${pin.pin.name || 'unnamed pin'}: plug tabs are too wide to leave breakaway gaps. Reduce Plug tab width or Plug gap per side.`)
+    }
     if (hasBoundary && (hole.polygon ? edges(hole.polygon).some(([a, b]) => !containsSegment(a, b, s.edgeClearance)) : !inside(pin, outline) || border.some(([a, b]) => pointSegmentDistance(pin, a, b) < hole.radius + s.edgeClearance - EPS))) add(pin.instance.id, `${pin.instance.name}: a pin hole is outside the usable plate.`)
     if (cuts.some(c => holePolygonDistance(hole, c.poly) < c.clearance + EPS)) add(pin.instance.id, `${pin.instance.name}: a pin hole intersects a through-cut.`)
   }
   for (let a = 0; a < allPins.length; a++) for (let b = a + 1; b < allPins.length; b++) if (holesDistance(allPins[a].hole, allPins[b].hole) < EPS) add(allPins[b].instance.id, 'Printed pin holes overlap or touch.')
   type Segment = { a: Point; b: Point; trace: Trace; index: number; start?: string; end?: string }
   const segs: Segment[] = []
-  const padRadius = (a: Anchor) => {
-    const pin = a.kind === 'pin' ? allPins.find(p => anchorKey(p.anchor) === anchorKey(a)) : null
-    const connectedWidth = Math.max(s.traceWidth, ...p.traces.filter(t => anchorKey(t.from) === anchorKey(a) || anchorKey(t.to) === anchorKey(a)).map(t => t.width))
-    return pin ? Math.max(s.landingDiameter, connectedWidth, pinOuterDiameter(pin.pin, s.holeAllowance) + 1) / 2 : connectedWidth / 2
-  }
+  const pads = landingPads(p), padByKey = new Map(pads.map(pin => [anchorKey(pin.anchor), pin.pad]))
   for (const t of p.traces) {
     const pts = tracePoints(p, t)
+    if (options.forExport && s.traceCut === 'lined' && s.traceCutWidth >= t.width - EPS) add(t.id, 'Trace Cut Width must be smaller than this trace width to leave raised borders.')
     if (pts.some(v => !Number.isFinite(v.x + v.y))) { add(t.id, 'Trace has a missing endpoint.'); continue }
     if (anchorKey(t.from) === anchorKey(t.to)) add(t.id, 'A trace cannot connect an anchor to itself.')
     for (let n = 0; n < pts.length - 1; n++) {
@@ -212,9 +228,9 @@ export function validateProject(p: Project, options: { forExport?: boolean } = {
       segs.push({ a, b, trace: t, index: n, start: n === 0 ? anchorKey(t.from) : undefined, end: n === pts.length - 2 ? anchorKey(t.to) : undefined })
     }
     for (const a of [t.from, t.to]) if (a.kind === 'pin') {
-      const center = anchorPoint(p, a), r = padRadius(a)
-      if (hasBoundary && (!inside(center, outline) || border.some(([a, b]) => pointSegmentDistance(center, a, b) < r + s.edgeClearance - EPS))) add(t.id, 'Pin landing pad violates board edge clearance.')
-      if (cuts.some(c => inside(center, c.poly) || edges(c.poly).some(([a, b]) => pointSegmentDistance(center, a, b) < r + s.separation + c.clearance - EPS))) add(t.id, 'Pin landing pad intersects a through-cut.')
+      const pad = padByKey.get(anchorKey(a))!
+      if (hasBoundary && (pad.polygon ? edges(pad.polygon).some(([a, b]) => !containsSegment(a, b, s.edgeClearance)) : !inside(pad.center, outline) || border.some(([a, b]) => pointSegmentDistance(pad.center, a, b) < pad.radius + s.edgeClearance - EPS))) add(t.id, 'Pin landing pad violates board edge clearance.')
+      if (cuts.some(c => holePolygonDistance(pad, c.poly) < Math.max(s.separation + c.clearance - EPS, EPS))) add(t.id, 'Pin landing pad intersects a through-cut.')
     }
   }
   for (let x = 0; x < segs.length; x++) for (let y = x + 1; y < segs.length; y++) {
@@ -230,15 +246,12 @@ export function validateProject(p: Project, options: { forExport?: boolean } = {
     if (segmentDistance(a.a, a.b, b.a, b.b) < (a.trace.width + b.trace.width) / 2 + s.separation - EPS) add(b.trace.id, 'Traces cross, overlap, or violate separation. Connect at an explicit junction.')
   }
   // Pads belong to anchors, not networks. Only an explicit shared anchor permits contact.
-  const connected = new Map<string, Anchor>()
-  for (const t of p.traces) for (const a of [t.from, t.to]) if (a.kind === 'pin') connected.set(anchorKey(a), a)
-  for (const [key, anchor] of connected) {
-    const center = anchorPoint(p, anchor), radius = padRadius(anchor)
-    for (const seg of segs) if (seg.start !== key && seg.end !== key && pointSegmentDistance(center, seg.a, seg.b) < radius + seg.trace.width / 2 + s.separation - EPS) add(seg.trace.id, 'Trace intersects an unrelated pin landing pad.')
-    for (const pin of allPins) if (anchorKey(pin.anchor) !== key && pointHoleDistance(center, pin.hole) < radius + s.separation - EPS) add(pin.instance.id, 'A landing pad is too close to another pin hole.')
+  for (const { anchor, pad } of pads) {
+    const key = anchorKey(anchor)
+    for (const seg of segs) if (seg.start !== key && seg.end !== key && segmentHoleDistance(seg.a, seg.b, pad) < seg.trace.width / 2 + s.separation - EPS) add(seg.trace.id, 'Trace intersects an unrelated pin landing pad.')
+    for (const pin of allPins) if (anchorKey(pin.anchor) !== key && holesDistance(pad, pin.hole) < Math.max(s.separation - EPS, EPS)) add(pin.instance.id, 'A landing pad is too close to another pin hole.')
   }
-  const padEntries = [...connected.entries()]
-  for (let a = 0; a < padEntries.length; a++) for (let b = a + 1; b < padEntries.length; b++) if (distance(anchorPoint(p, padEntries[a][1]), anchorPoint(p, padEntries[b][1])) < padRadius(padEntries[a][1]) + padRadius(padEntries[b][1]) + s.separation - EPS) add('routing', 'Separate pin landing pads overlap or violate separation.')
+  for (let a = 0; a < pads.length; a++) for (let b = a + 1; b < pads.length; b++) if (holesDistance(pads[a].pad, pads[b].pad) < Math.max(s.separation - EPS, EPS)) add('routing', 'Separate pin landing pads overlap or violate separation.')
   return issues
 }
 export function cleanJunctions(p: Project) { p.junctions = p.junctions.filter(j => p.traces.some(t => [t.from, t.to].some(a => a.kind === 'junction' && a.id === j.id))) }

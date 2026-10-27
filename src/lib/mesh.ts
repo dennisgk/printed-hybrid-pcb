@@ -1,10 +1,13 @@
 import type { Manifold, ManifoldToplevel, CrossSection, Vec2 } from 'manifold-3d'
-import type { Project, Point, Anchor } from './model'
-import { anchorKey, anchorPoint, pinHole, pinOuterDiameter, pins, rect, tracePoints, transform, validateProject, zonePolygon } from './geometry'
+import type { Project, Point } from './model'
+import { landingPads, pinHole, pins, rect, tracePoints, transform, validateProject, zonePolygon } from './geometry'
+import { solveDefinition } from './constraints'
 
 export type MeshResult = { positions: Float32Array; indices: Uint32Array; volume: number; triangles: number; bounds: { min: number[]; max: number[] } }
 
-export function generateMesh(api: ManifoldToplevel, project: Project): MeshResult {
+export function generateMesh(api: ManifoldToplevel, source: Project): MeshResult {
+  const project = structuredClone(source)
+  for (const definition of project.definitions) solveDefinition(definition)
   const issues = validateProject(project, { forExport: true })
   if (issues.length) throw new Error(issues[0].message)
   const allocated: { delete(): void }[] = []
@@ -17,6 +20,16 @@ export function generateMesh(api: ManifoldToplevel, project: Project): MeshResul
   }
   const extrude = (shape: CrossSection, height: number, z: number) => own(own(shape.extrude(height)).translate([0, 0, z]))
   const circle = (p: Point, radius: number) => own(own(C.circle(radius, 64)).translate([p.x, p.y]))
+  const traceSection = (pts: Point[], width: number) => {
+    const sections: CrossSection[] = [], r = width / 2
+    for (let n = 0; n < pts.length - 1; n++) {
+      const a = pts[n], b = pts[n + 1], angle = Math.atan2(b.y - a.y, b.x - a.x)
+      const offset = { x: -Math.sin(angle) * r, y: Math.cos(angle) * r }
+      sections.push(polygon([{ x: a.x + offset.x, y: a.y + offset.y }, { x: a.x - offset.x, y: a.y - offset.y }, { x: b.x - offset.x, y: b.y - offset.y }, { x: b.x + offset.x, y: b.y + offset.y }]))
+    }
+    for (const point of pts) sections.push(circle(point, r))
+    return own(C.union(sections))
+  }
   const union = (parts: Manifold[]) => own(M.union(parts))
   try {
     const outline = polygon(project.board.outline)
@@ -34,27 +47,42 @@ export function generateMesh(api: ManifoldToplevel, project: Project): MeshResul
         subtract.push(extrude(shape, z.mode === 'cut' ? top + 2 * epsilon : z.depth + epsilon, z.mode === 'cut' ? -epsilon : top - z.depth))
       }
     }
-    const connectedPins = new Map<string, { anchor: Anchor; width: number }>()
     for (const t of project.traces) {
-      const pts = tracePoints(project, t), sections: CrossSection[] = []
-      for (let n = 0; n < pts.length - 1; n++) {
-        const a = pts[n], b = pts[n + 1], angle = Math.atan2(b.y - a.y, b.x - a.x), r = t.width / 2
-        const offset = { x: -Math.sin(angle) * r, y: Math.cos(angle) * r }
-        sections.push(polygon([{ x: a.x + offset.x, y: a.y + offset.y }, { x: a.x - offset.x, y: a.y - offset.y }, { x: b.x - offset.x, y: b.y - offset.y }, { x: b.x + offset.x, y: b.y + offset.y }]))
-      }
-      for (const point of pts) sections.push(circle(point, t.width / 2))
-      solids.push(extrude(own(C.union(sections)), s.ridgeHeight + epsilon, 0))
-      for (const a of [t.from, t.to]) if (a.kind === 'pin') { const key = anchorKey(a); connectedPins.set(key, { anchor: a, width: Math.max(t.width, connectedPins.get(key)?.width ?? 0) }) }
+      const pts = tracePoints(project, t)
+      solids.push(extrude(traceSection(pts, t.width), s.ridgeHeight + epsilon, 0))
+      // Stop exactly at the base surface: channels remove only the raised
+      // underside ridges, never plate thickness or the topside recess floor.
+      if (s.traceCut === 'lined') subtract.push(extrude(traceSection(pts, s.traceCutWidth), s.ridgeHeight + epsilon, -epsilon))
     }
     const allPins = pins(project)
-    for (const { anchor, width } of connectedPins.values()) {
-      const pin = allPins.find(p => anchorKey(p.anchor) === anchorKey(anchor))!
-      const diameter = Math.max(s.landingDiameter, s.traceWidth, width, pinOuterDiameter(pin.pin, s.holeAllowance) + 1)
-      solids.push(extrude(circle(anchorPoint(project, anchor), diameter / 2), s.ridgeHeight + epsilon, 0))
+    for (const { pin, instance, pad } of landingPads(project)) {
+      solids.push(extrude(pad.polygon ? polygon(pad.polygon) : circle(pad.center, pad.radius), s.ridgeHeight + epsilon, 0))
+      if (s.traceCut === 'lined' && pad.polygon) {
+        const cut = pinHole({ ...pin, diameter: s.traceCutWidth }, instance, 0)
+        subtract.push(extrude(polygon(cut.polygon!), s.ridgeHeight + epsilon, -epsilon))
+      }
     }
     for (const pin of allPins) {
+      if (s.plugHoles === 'fill') continue
       const hole = pinHole(pin.pin, pin.instance, s.holeAllowance)
-      subtract.push(extrude(hole.polygon ? polygon(hole.polygon) : circle(hole.center, hole.radius), s.thickness + s.ridgeHeight + 2 * epsilon, -epsilon))
+      const section = hole.polygon ? polygon(hole.polygon) : circle(hole.center, hole.radius)
+      const height = s.thickness + s.ridgeHeight + 2 * epsilon
+      if (s.plugHoles === 'slightly-connected') {
+        // Carve a relief around the core, retaining four tabs only near the
+        // plate underside. Subtractive construction preserves every recess/cut
+        // and clips the plugs to the actual material at each pin.
+        const radius = hole.radius - s.plugGap
+        const core = hole.polygon
+          ? polygon(rect(pin.pin.x - radius, pin.pin.y - radius, radius * 2, radius * 2).map(p => transform(p, pin.instance)))
+          : circle(hole.center, radius)
+        const relief = extrude(own(section.subtract(core)), height, -epsilon)
+        const makeTab = (angle: number) => {
+          const local = polygon(rect(-hole.radius - epsilon, -s.plugTabWidth / 2, 2 * (hole.radius + epsilon), s.plugTabWidth))
+          const placed = own(own(local.rotate(pin.instance.rotation + angle)).translate([hole.center.x, hole.center.y]))
+          return extrude(placed, s.plugTabThickness, s.ridgeHeight)
+        }
+        subtract.push(own(relief.subtract(union([makeTab(0), makeTab(90)]))))
+      } else subtract.push(extrude(section, height, -epsilon))
     }
     let solid = union(solids)
     if (subtract.length) solid = own(solid.subtract(union(subtract)))

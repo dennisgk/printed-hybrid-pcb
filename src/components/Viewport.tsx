@@ -1,18 +1,20 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { Maximize, Minus, Plus, RotateCcw } from 'lucide-react'
-import type { Definition, Point, Project, Selection, Tool, Zone, ZoneShape, PinShape, Viewport as Camera } from '../lib/model'
+import type { Annotation, Constraint, Definition, Feature, Point, Project, Selection, Tool, Zone, ZoneShape, PinShape, Viewport as Camera } from '../lib/model'
 import { clone, id } from '../lib/model'
-import { anchorKey, bodyPolygon, bounds, connectTarget, createPolygonZone, distance, equal, nearestTarget, normalizePolygonZone, outlineError, pins, projectContentPoints, rect, snap, snapAngle, tracePoints, transform, validateProject, zonePolygon } from '../lib/geometry'
+import { anchorKey, bodyPolygon, bounds, connectTarget, createPolygonZone, distance, equal, landingPads, nearestTarget, normalizePolygonZone, outlineError, pinHole, pins, projectContentPoints, rect, snap, snapAngle, tracePoints, transform, validateProject, zonePolygon } from '../lib/geometry'
 import { installZoomGestures } from '../lib/viewport-input'
 import type { Target } from '../lib/geometry'
 import { Button } from './ui/button'
+import { makeConstraintWithFallback, nearestCenterObject, nearestFeature, prepareConstraintEdit, solveDefinitionEdit } from '../lib/constraints'
+import { ConstraintOverlay } from './ConstraintOverlay'
 
-type Props = { project: Project; tool: Tool; selection: Selection; select: (s: Selection) => void; commit: (fn: (p: Project) => void) => void; workspace: (fn: (w: Project['workspace']) => void) => void; notify: (message: string) => void; definitionId: string; traceWidth: number; angle: '45' | '90' | 'free'; edgeMode: 'polygon' | 'rectangle'; zoneShape: ZoneShape; pinShape: PinShape; snapEnabled: boolean; fitSignal: number }
+type Props = { project: Project; tool: Tool; selection: Selection; select: (s: Selection) => void; commit: (fn: (p: Project) => void) => boolean; workspace: (fn: (w: Project['workspace']) => void) => void; notify: (message: string) => void; definitionId: string; traceWidth: number; angle: '45' | '90' | 'free'; edgeMode: 'polygon' | 'rectangle'; zoneShape: ZoneShape; pinShape: PinShape; circleMode: 'near' | 'center' | 'far'; snapEnabled: boolean; fitSignal: number }
 const pointsString = (pts: Point[]) => pts.map(p => `${p.x},${p.y}`).join(' ')
 const sameSelection = (a: Selection, kind: string, id: string) => a?.kind === kind && a.id === id
 export function Viewport(props: Props) {
-  const { project, tool, selection, select, commit, workspace, notify, definitionId, traceWidth, angle, edgeMode, zoneShape, pinShape, snapEnabled, fitSignal } = props
+  const { project, tool, selection, select, commit, workspace, notify, definitionId, traceWidth, angle, edgeMode, zoneShape, pinShape, circleMode, snapEnabled, fitSignal } = props
   const tab = project.workspace.activeTab, isProject = tab === 'project', mirror = 1, bottom = isProject && project.workspace.side === 'bottom'
   const container = useRef<HTMLDivElement>(null), svg = useRef<SVGSVGElement>(null)
   const [size, setSize] = useState({ width: 900, height: 650 })
@@ -24,13 +26,15 @@ export function Viewport(props: Props) {
   const [routeStart, setRouteStart] = useState<Target | null>(null)
   const [hoverTarget, setHoverTarget] = useState<Target | null>(null)
   const [space, setSpace] = useState(false)
+  const [firstFeature, setFirstFeature] = useState<Feature | null>(null), [hoverFeature, setHoverFeature] = useState<Feature | null>(null)
+  const [pendingConstraint, setPendingConstraint] = useState<Constraint | null>(null), [editingConstraint, setEditingConstraint] = useState<string | null>(null)
   const pan = useRef<{ x: number; y: number; camera: Camera } | null>(null)
-  const drag = useRef<{ origin: Point; selection: NonNullable<Selection>; base: Project; moved: boolean } | null>(null)
+  const drag = useRef<{ origin: Point; selection: NonNullable<Selection>; base: Project; moved: boolean; raw?: Project; error?: string } | null>(null)
   const shown = preview ?? project
   const definition = isProject ? null : shown.workspace.drafts[tab] ?? shown.definitions.find(d => d.id === tab) ?? null
   const projectBounds = bounds(project.board.outline)
   const latest = useRef(props); latest.current = props
-  const cancel = () => { setDrawing([]); setRouteStart(null); setPreview(null); drag.current = null; pan.current = null }
+  const cancel = () => { setDrawing([]); setRouteStart(null); setPreview(null); setFirstFeature(null); setHoverFeature(null); setPendingConstraint(null); setEditingConstraint(null); drag.current = null; pan.current = null }
   const fit = () => {
     const current = latest.current.project, t = current.workspace.activeTab
     const d = current.workspace.drafts[t] ?? current.definitions.find(d => d.id === t)
@@ -101,11 +105,37 @@ export function Viewport(props: Props) {
     if (error) { notify(`Invalid clearance polygon: ${error}`); return }
     saveZone(createPolygonZone(points))
   }
+  function applyConstraint(constraint: Constraint, expression: string, value: number): boolean {
+    if (!definition) return false
+    try {
+      const next = { ...clone(constraint), expression, value }
+      const prepared = prepareConstraintEdit(definition, next)
+      if (!commit(p => { p.workspace.drafts[tab] = prepared.result })) return false
+      if (prepared.reversed) notify('Reversed the selections to use a valid driven object.')
+      setFirstFeature(null); setHoverFeature(null); setPendingConstraint(null); setEditingConstraint(null); select({ kind: 'constraint', id: next.id }); return true
+    } catch (error) { notify((error as Error).message); return false }
+  }
+  function moveAnnotation(constraint: Constraint, annotation: Annotation): boolean {
+    if (pendingConstraint?.id === constraint.id) { setPendingConstraint({ ...pendingConstraint, annotation }); return true }
+    return commit(p => { const c = p.workspace.drafts[tab].constraints?.find(c => c.id === constraint.id); if (c) c.annotation = annotation })
+  }
   function down(e: ReactPointerEvent<SVGSVGElement>) {
     if (e.button === 2) return
     e.currentTarget.focus(); e.currentTarget.setPointerCapture(e.pointerId)
     if (e.button === 1 || space) { e.preventDefault(); pan.current = { x: e.clientX, y: e.clientY, camera }; return }
     const raw = world(e.clientX, e.clientY), point = quantize(raw)
+    if (!isProject && definition && (tool === 'parallel' || tool === 'angular' || tool === 'central')) {
+      if (pendingConstraint) return
+      const feature = (tool === 'central' ? nearestCenterObject(definition, raw, 10 / camera.zoom, firstFeature) : nearestFeature(definition, raw, 10 / camera.zoom, { first: firstFeature, angular: tool === 'angular', circleMode }))
+      if (!feature) { notify(tool === 'central' ? 'Choose a rectangle, square pin, or circle to align by center.' : tool === 'angular' ? 'Choose adjacent sides of the same polygon.' : firstFeature ? 'Choose a parallel side, midaxis, or circular target.' : 'Choose a straight side or rectangular midaxis.'); return }
+      if (!firstFeature) { setFirstFeature(feature); return }
+      try {
+        const created = makeConstraintWithFallback(definition, tool, firstFeature, feature), constraint = created.result
+        if (constraint.kind === 'central') { if (applyConstraint(constraint, '0', 0) && created.reversed) notify('Reversed the selections to use a valid ground object.') }
+        else { setPendingConstraint(constraint); setEditingConstraint(constraint.id); setFirstFeature(null); setHoverFeature(null); if (created.reversed) notify('Reversed the selections to use a valid driven object.') }
+      } catch (error) { notify((error as Error).message) }
+      return
+    }
     if (tool === 'select') {
       const hit = (e.target as Element).closest('[data-kind]') as SVGElement | null
       if (hit) {
@@ -186,15 +216,22 @@ export function Viewport(props: Props) {
       if (s.kind === 'trace' && s.vertex !== undefined) { const t = next.traces.find(t => t.id === s.id)!; t.vertices[s.vertex].x += dx; t.vertices[s.vertex].y += dy }
       if (s.kind === 'zone' && s.vertex !== undefined) { const zone = next.workspace.drafts[tab].zones.find(z => z.id === s.id)!; zone.vertices![s.vertex].x += dx; zone.vertices![s.vertex].y += dy; normalizePolygonZone(zone) }
       else if (s.kind === 'pin' || s.kind === 'zone') { const def = next.workspace.drafts[tab], item = s.kind === 'pin' ? def.pins.find(p => p.id === s.id)! : def.zones.find(z => z.id === s.id)!; item.x += dx; item.y += dy }
+      d.raw = clone(next)
+      if (!isProject) {
+        try { next.workspace.drafts[tab] = solveDefinitionEdit(d.base.workspace.drafts[tab], next.workspace.drafts[tab]); d.error = undefined }
+        catch (error) { d.error = (error as Error).message; setPreview(null); return }
+      }
       setPreview(next); return
     }
+    if (!isProject && definition && (tool === 'parallel' || tool === 'angular' || tool === 'central')) setHoverFeature((tool === 'central' ? nearestCenterObject(definition, raw, 10 / camera.zoom, firstFeature) : nearestFeature(definition, raw, 10 / camera.zoom, { first: firstFeature, angular: tool === 'angular', circleMode })))
     if (tool === 'trace' && isProject) setHoverTarget(nearestTarget(project, raw, Math.max(9 / camera.zoom, .3)))
   }
   function up() {
     if (pan.current) { workspace(w => { w.viewports[tab] = cameraRef.current }); pan.current = null }
-    if (drag.current && preview && drag.current.moved) {
+    if (drag.current?.error) notify(drag.current.error)
+    else if (drag.current && preview && drag.current.moved) {
       if (!isProject || acceptChange(drag.current.base, preview)) {
-        const candidate = preview
+        const candidate = drag.current.raw ?? preview
         commit(p => { if (isProject) { p.instances = candidate.instances; p.traces = candidate.traces; p.board.outline = candidate.board.outline } else p.workspace.drafts[tab] = candidate.workspace.drafts[tab] })
       }
     }
@@ -221,7 +258,17 @@ export function Viewport(props: Props) {
               {zoom > 3 && showLabel({ x: center.x, y: center.y - font }, `${d.width} × ${d.height} mm`, 'dimension-label')}
             </g>
           })}</g>
-  const traceLayer = <g data-layer="traceLayer">{shown.traces.map(t => <g key={t.id} data-kind="trace" data-id={t.id} opacity={bottom ? 1 : .38} className="trace-target"><polyline points={pointsString(tracePoints(shown, t))} fill="none" stroke="transparent" strokeWidth={Math.max(t.width, 10 / zoom)} strokeLinejoin="round" strokeLinecap="round" /><polyline points={pointsString(tracePoints(shown, t))} fill="none" stroke={sameSelection(selection, 'trace', t.id) ? '#e2ff9b' : '#b6cf83'} strokeOpacity=".7" strokeWidth={t.width} strokeLinejoin="round" strokeLinecap="round" pointerEvents="none" /><polyline points={pointsString(tracePoints(shown, t))} fill="none" stroke="#e3f0c9" strokeOpacity=".7" strokeWidth={stroke * .7} strokeDasharray={`${4 / zoom} ${4 / zoom}`} pointerEvents="none" /></g>)}</g>
+  const pads = landingPads(shown)
+  const traceLayer = <g data-layer="traceLayer"><g pointerEvents="none" opacity={bottom ? 1 : .38} fill="#b6cf83" fillOpacity=".7">{pads.map(({ anchor, pad }) => pad.polygon
+    ? <polygon key={anchorKey(anchor)} points={pointsString(pad.polygon)} />
+    : <circle key={anchorKey(anchor)} cx={pad.center.x} cy={pad.center.y} r={pad.radius} />)}</g>{shown.traces.map(t => {
+    const path = pointsString(tracePoints(shown, t))
+    return <g key={t.id} data-kind="trace" data-id={t.id} opacity={bottom ? 1 : .38} className="trace-target">
+      <polyline points={path} fill="none" stroke="transparent" strokeWidth={Math.max(t.width, 10 / zoom)} strokeLinejoin="round" strokeLinecap="round" />
+      <polyline points={path} fill="none" stroke={sameSelection(selection, 'trace', t.id) ? '#e2ff9b' : '#b6cf83'} strokeOpacity=".7" strokeWidth={t.width} strokeLinejoin="round" strokeLinecap="round" pointerEvents="none" />
+      {shown.board.settings.traceCut !== 'lined' && <polyline points={path} fill="none" stroke="#e3f0c9" strokeOpacity=".7" strokeWidth={stroke * .7} strokeDasharray={`${4 / zoom} ${4 / zoom}`} pointerEvents="none" />}
+    </g>
+  })}{shown.board.settings.traceCut === 'lined' && <g pointerEvents="none" opacity={bottom ? 1 : .38}>{shown.traces.map(t => <polyline key={t.id} points={pointsString(tracePoints(shown, t))} fill="none" stroke="#12171d" strokeOpacity=".85" strokeWidth={shown.board.settings.traceCutWidth} strokeLinejoin="round" strokeLinecap="round" />)}{pads.filter(p => p.pad.polygon).map(({ anchor, pin, instance }) => <polygon key={anchorKey(anchor)} points={pointsString(pinHole({ ...pin, diameter: shown.board.settings.traceCutWidth }, instance, 0).polygon!)} fill="#12171d" fillOpacity=".85" />)}</g>}</g>
   return <div className={`viewport tool-${tool} ${space || pan.current ? 'panning' : ''}`} ref={container}>
     <div className="view-heading"><span className="view-dot" /><strong>{isProject ? 'PROJECT WORKSPACE' : 'COMPONENT WORKSPACE'}</strong><span>/</span><span>{isProject ? project.workspace.side === 'top' ? 'Top · component face' : 'Bottom · conductive face' : 'Local coordinates'}</span></div>
     <svg ref={svg} width="100%" height="100%" tabIndex={0} aria-label={isProject ? 'Project design canvas' : 'Component design canvas'} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={() => { cancel() }} onContextMenu={e => e.preventDefault()}>
@@ -246,6 +293,7 @@ export function Viewport(props: Props) {
           {showLabel({ x: definition.width / 2, y: -font * 2 }, `${definition.width} × ${definition.height} mm`, 'dimension-label')}
           {showLabel({ x: -font * 2, y: -font * 1.5 }, '0,0', 'dimension-label')}
           {tool === 'pin' && (pinShape === 'square' ? <rect x={cursor.x - .5} y={cursor.y - .5} width="1" height="1" fill="#a3e63540" stroke="#a3e635" strokeWidth={stroke} pointerEvents="none" /> : <circle cx={cursor.x} cy={cursor.y} r=".5" fill="#a3e63540" stroke="#a3e635" strokeWidth={stroke} pointerEvents="none" />)}
+          <ConstraintOverlay definition={definition} tool={tool} first={firstFeature} hover={hoverFeature} pending={pendingConstraint} selectedId={selection?.kind === 'constraint' ? selection.id : undefined} editingId={editingConstraint} edit={setEditingConstraint} select={id => select({ kind: 'constraint', id })} apply={applyConstraint} moveAnnotation={moveAnnotation} cancel={() => { setEditingConstraint(null); setPendingConstraint(null); setFirstFeature(null) }} zoom={zoom} camera={camera} size={size} host={container.current} />
         </>}
         {drawing.length > 0 && (tool === 'zone' && zoneShape === 'rectangle' || tool === 'edge' && edgeMode === 'rectangle') ? <rect x={Math.min(drawing[0].x, cursor.x)} y={Math.min(drawing[0].y, cursor.y)} width={Math.abs(cursor.x - drawing[0].x)} height={Math.abs(cursor.y - drawing[0].y)} fill="#a3e63510" stroke="#c0eb8e" strokeWidth={stroke * 1.5} strokeDasharray={`${5 / zoom} ${4 / zoom}`} pointerEvents="none" /> : drawing.length > 0 && tool === 'zone' && zoneShape === 'circle' ? <circle cx={drawing[0].x} cy={drawing[0].y} r={distance(drawing[0], cursor)} fill="#a3e63510" stroke="#c0eb8e" strokeWidth={stroke * 1.5} pointerEvents="none" /> : drawing.length > 0 && <polyline points={pointsString(previewPath)} fill={tool === 'edge' || tool === 'zone' ? '#a3e6350b' : 'none'} stroke="#ddf4b4" strokeWidth={tool === 'trace' ? traceWidth : stroke * 1.5} strokeOpacity=".7" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />}
         {(tool === 'edge' || tool === 'zone' && zoneShape === 'polygon') && drawing.map((p, i) => <circle key={i} cx={p.x} cy={p.y} r={4 / zoom} fill="#d7f5ad" pointerEvents="none" />)}

@@ -1,14 +1,169 @@
 import { beforeAll, describe, expect, it } from 'vitest'
 import Module from 'manifold-3d'
 import type { ManifoldToplevel } from 'manifold-3d'
+import { Ray, Vector3 } from 'three'
 import { createProject, id } from '../src/lib/model'
 import { exampleProject } from '../src/lib/example'
 import { binarySTL, generateMesh } from '../src/lib/mesh'
-import { rect } from '../src/lib/geometry'
+import { anchorPoint, connectTarget, rect, transform, validateProject } from '../src/lib/geometry'
+import type { MeshResult } from '../src/lib/mesh'
+import { makeParallel } from '../src/lib/constraints'
 
 let api: ManifoldToplevel
 beforeAll(async () => { api = await Module(); api.setup() })
+
+// Ray parity checks actual exported triangles, including gaps and tab heights.
+function containsMaterial(mesh: MeshResult, point: { x: number; y: number }, z: number) {
+  const ray = new Ray(new Vector3(point.x, point.y, z), new Vector3(0, 0, 1)), hits = new Set<string>()
+  const vertex = (index: number) => new Vector3().fromArray(mesh.positions, index * 3)
+  for (let n = 0; n < mesh.indices.length; n += 3) {
+    const hit = ray.intersectTriangle(vertex(mesh.indices[n]), vertex(mesh.indices[n + 1]), vertex(mesh.indices[n + 2]), false, new Vector3())
+    if (hit) hits.add(hit.z.toFixed(5))
+  }
+  return hits.size % 2 === 1
+}
+
 describe('manufacturing meshes', () => {
+  it.each(['none', 'lined'] as const)('matches landing pad and center opening shapes to rotated pins with %s trace cuts', traceCut => {
+    const p = createProject('Pad shapes'); p.board.outline = rect(0, 0, 100, 80)
+    Object.assign(p.board.settings, { landingDiameter: 4, traceWidth: 1.5, traceCut, traceCutWidth: .8 })
+    const pin = { id: id(), name: 'A', x: 5, y: 5, diameter: .2, shape: 'square' as 'square' | 'circle', color: '#a3e635' }
+    const d = { id: id(), name: 'Pins', width: 10, height: 10, recessDepth: 1, fitClearance: 0, pins: [pin], zones: [] }
+    const instance = { id: id(), name: 'Pins 1', definitionId: d.id, x: 30, y: 20, rotation: 31, recessDepth: null, fitClearance: null }
+    p.definitions.push(d); p.instances.push(instance)
+    const center = transform(pin, instance), end = { id: id(), x: center.x + 20, y: center.y }
+    p.junctions.push(end); p.traces.push({ id: id(), width: 1.5, from: { kind: 'pin', instanceId: instance.id, pinId: pin.id }, to: { kind: 'junction', id: end.id }, vertices: [] })
+    const local = (x: number, y: number) => transform({ x: pin.x + x, y: pin.y + y }, instance)
+    const square = generateMesh(api, p)
+    expect(containsMaterial(square, local(1.7, 1.7), .2)).toBe(true)
+    expect(containsMaterial(square, local(2.1, .3), .2)).toBe(false)
+    expect(containsMaterial(square, local(.35, .35), .2)).toBe(traceCut === 'none')
+    p.board.settings.squarePinBottomFace = 'circular'
+    const circularBottom = generateMesh(api, p)
+    expect(containsMaterial(circularBottom, local(1.7, 1.7), .2)).toBe(false)
+    expect(containsMaterial(circularBottom, local(.35, .35), .2)).toBe(true)
+    expect(containsMaterial(circularBottom, local(.17, .17), .8)).toBe(false) // The hole remains square.
+    expect(pin.shape).toBe('square')
+    pin.shape = 'circle'
+    const circular = generateMesh(api, p)
+    expect(containsMaterial(circular, local(1.7, 1.7), .2)).toBe(false)
+    expect(containsMaterial(circular, local(.35, .35), .2)).toBe(true)
+    expect(containsMaterial(circular, local(.17, .17), .8)).toBe(true)
+  })
+  it('cuts flush channels through straights, round bends, end caps, and explicit branches while retaining borders', () => {
+    const p = createProject('Wire channels'); p.board.outline = rect(0, 0, 100, 80)
+    const start = { id: id(), x: 20, y: 20 }, end = { id: id(), x: 80, y: 60 }, branch = { id: id(), x: 80, y: 40 }
+    p.junctions.push(start, end, branch)
+    const trace = { id: id(), width: 3, from: { kind: 'junction' as const, id: start.id }, to: { kind: 'junction' as const, id: end.id }, vertices: [{ x: 60, y: 20 }, { x: 60, y: 60 }] }
+    p.traces.push(trace)
+    const joint = connectTarget(p, { kind: 'segment', traceId: trace.id, segment: 1, point: { x: 60, y: 40 } })
+    p.traces.push({ id: id(), width: 3, from: joint, to: { kind: 'junction', id: branch.id }, vertices: [] })
+    const solid = generateMesh(api, p), source = structuredClone(p)
+    p.board.settings.traceCut = 'lined'; p.board.settings.traceCutWidth = 1.2
+    const lined = generateMesh(api, p)
+    expect(lined.volume).toBeLessThan(solid.volume)
+    for (const point of [{ x: 40, y: 20.03 }, { x: 60.03, y: 20.04 }, { x: 19.6, y: 20.1 }, { x: 60.03, y: 40.04 }]) {
+      expect(containsMaterial(solid, point, .2)).toBe(true)
+      expect(containsMaterial(lined, point, .2)).toBe(false)
+      expect(containsMaterial(lined, point, .8)).toBe(true)
+    }
+    for (const point of [{ x: 40, y: 21.1 }, { x: 60.9, y: 19.1 }]) expect(containsMaterial(lined, point, .2)).toBe(true)
+    // The channel floor is exactly the base plane, without eating into the plate.
+    expect(containsMaterial(lined, { x: 40, y: 20.03 }, .599)).toBe(false)
+    expect(containsMaterial(lined, { x: 40, y: 20.03 }, .601)).toBe(true)
+    p.board.settings.traceCut = 'none'; p.board.settings.traceCutWidth = 1
+    expect(p).toEqual(source)
+  })
+  it.each(['none', 'fill', 'slightly-connected'] as const)('keeps landing pad rims and lined channels compatible with %s hole plugs', plugHoles => {
+    const p = exampleProject(); p.board.settings.plugHoles = plugHoles
+    p.definitions.forEach(d => d.pins.forEach(pin => { pin.diameter = .4 }))
+    p.board.settings.plugGap = .05; p.board.settings.plugTabWidth = .1
+    const solid = generateMesh(api, p)
+    p.board.settings.traceCut = 'lined'; p.board.settings.traceCutWidth = 1.2
+    const lined = generateMesh(api, p), pin = anchorPoint(p, p.traces[0].from)
+    const cap = { x: pin.x - .45, y: pin.y + .04 }, rim = { x: pin.x - 1.1, y: pin.y + .04 }
+    expect(containsMaterial(solid, cap, .2)).toBe(true)
+    expect(containsMaterial(lined, cap, .2)).toBe(false)
+    expect(containsMaterial(lined, cap, .8)).toBe(true)
+    expect(containsMaterial(lined, rim, .2)).toBe(true)
+    expect(lined.volume).toBeLessThan(solid.volume)
+  })
+  it('rejects cut widths that erase borders and retains existing single-layer crossing checks', () => {
+    const p = exampleProject(); p.board.settings.traceCut = 'lined'
+    for (const width of [3, 4]) {
+      p.board.settings.traceCutWidth = width
+      expect(() => generateMesh(api, p)).toThrow('Trace Cut Width must be smaller')
+    }
+    p.board.settings.traceCutWidth = 1
+    p.traces[1].vertices = [{ x: 50, y: 29 }]
+    expect(validateProject(p).some(i => i.message.includes('cross'))).toBe(true)
+    expect(() => generateMesh(api, p)).toThrow()
+  })
+  it.each(['circle', 'square'] as const)('builds removable %s plugs with thin tabs, open reliefs, and intact recesses', shape => {
+    const p = createProject('Breakaway plug'); p.board.outline = rect(0, 0, 100, 80)
+    const definitionId = id(), pin = { id: id(), name: 'A', x: 5, y: 5, shape, diameter: 3, color: '#a3e635' }
+    const instance = { id: id(), definitionId, name: 'Pins 1', x: 30, y: 20, rotation: 31, recessDepth: null, fitClearance: null }
+    p.definitions.push({ id: definitionId, name: 'Pins', width: 10, height: 10, recessDepth: 1, fitClearance: 0, pins: [pin], zones: [] })
+    p.instances.push(instance)
+    p.board.settings.plugGap = .2
+    const open = generateMesh(api, p)
+    p.board.settings.plugHoles = 'fill'
+    const filled = generateMesh(api, p)
+    expect(filled.volume).toBeCloseTo(23900, 3) // Filling must not erase the body recess.
+    p.board.settings.plugHoles = 'slightly-connected'
+    const plugged = generateMesh(api, p)
+    expect(plugged.volume).toBeGreaterThan(open.volume); expect(plugged.volume).toBeLessThan(filled.volume)
+    const local = (x: number, y: number) => transform({ x: pin.x + x, y: pin.y + y }, instance)
+    const axis = local(1.5, .03), gap = shape === 'square' ? local(1.5, .5) : local(1.5 / Math.SQRT2, 1.5 / Math.SQRT2)
+    expect(containsMaterial(plugged, local(0, 0), .9)).toBe(true)
+    expect(containsMaterial(plugged, gap, .7)).toBe(false)
+    expect(containsMaterial(plugged, axis, .7)).toBe(true) // Four tabs exist only in the thin underside band.
+    expect(containsMaterial(plugged, axis, .9)).toBe(false)
+    expect(containsMaterial(plugged, local(0, 0), 3)).toBe(false) // Recess remains open above the plug.
+    expect(containsMaterial(filled, gap, .9)).toBe(true)
+    expect(containsMaterial(open, local(0, 0), .9)).toBe(false)
+    p.board.settings.plugTabThickness = .1
+    expect(generateMesh(api, p).volume).toBeLessThan(plugged.volume)
+    p.board.settings.plugGap = 2
+    expect(() => generateMesh(api, p)).toThrow('plug gap leaves no plug')
+    p.board.settings.plugGap = .2; p.board.settings.plugTabWidth = 3
+    expect(() => generateMesh(api, p)).toThrow('plug tabs are too wide')
+  })
+  it('keeps plugged landing pads connected and does not change source geometry or routing rules', () => {
+    const p = exampleProject(), source = structuredClone(p)
+    p.board.settings.plugHoles = 'slightly-connected'
+    const plugged = generateMesh(api, p)
+    const center = anchorPoint(p, p.traces[0].from)
+    expect(containsMaterial(plugged, center, .1)).toBe(true)
+    p.board.settings.plugHoles = 'fill'
+    expect(generateMesh(api, p).volume).toBeGreaterThan(plugged.volume)
+    p.board.settings.plugHoles = 'none'
+    expect(p).toEqual(source)
+    expect(containsMaterial(generateMesh(api, p), center, .1)).toBe(false)
+    p.board.settings.plugHoles = 'fill'; p.traces[0].width = 55
+    expect(() => generateMesh(api, p)).toThrow()
+  })
+  it('uses the configurable landing margin for solids and clearance validation', () => {
+    const p = exampleProject()
+    p.board.settings.landingDiameter = .01; p.board.settings.traceWidth = .5
+    p.traces.forEach(t => { t.width = .5 })
+    p.board.settings.landingMargin = 0
+    const small = generateMesh(api, p)
+    p.board.settings.landingMargin = 2
+    expect(generateMesh(api, p).volume).toBeGreaterThan(small.volume)
+    p.board.settings.landingMargin = 100
+    expect(() => generateMesh(api, p)).toThrow('landing pad')
+  })
+  it('uses solved constraint geometry and leaves the source document untouched', () => {
+    const p = createProject('Constrained cut'); p.board.outline = rect(0, 0, 100, 80)
+    const definitionId = id(), zoneId = id()
+    p.definitions.push({ id: definitionId, name: 'Cut', width: 10, height: 10, recessDepth: 0, fitClearance: 0, pins: [], zones: [{ id: zoneId, name: 'Cut', x: 20, y: 20, width: 5, height: 5, mode: 'cut', depth: 0 }] })
+    p.instances.push({ id: id(), name: 'Cut 1', definitionId, x: 20, y: 20, rotation: 0, recessDepth: null, fitClearance: null })
+    const d = p.definitions[0], c = makeParallel(d, { owner: 'zone', id: zoneId, feature: 'left' }, { owner: 'zone', id: zoneId, feature: 'right' })
+    c.expression = '3*2'; c.value = 6; d.constraints = [c]
+    expect(generateMesh(api, p).volume).toBeCloseTo(24000 - 6 * 5 * 3, 3)
+    expect(d.zones[0].width).toBe(5)
+  })
   it('subtracts square holes using side = diameter + allowance at arbitrary component rotation', () => {
     const p = createProject('Square hole'); p.board.outline = rect(0, 0, 100, 80)
     const definitionId = id()

@@ -11,7 +11,7 @@
         },
         "schemaVersion": {
           "type": "number",
-          "const": 1
+          "const": 2
         },
         "appVersion": {
           "type": "string"
@@ -106,9 +106,59 @@
               "type": "number",
               "exclusiveMinimum": 0
             },
+            "landingMargin": {
+              "default": 1,
+              "type": "number",
+              "minimum": 0
+            },
             "grid": {
               "type": "number",
               "exclusiveMinimum": 0
+            },
+            "plugHoles": {
+              "default": "none",
+              "type": "string",
+              "enum": [
+                "none",
+                "fill",
+                "slightly-connected"
+              ]
+            },
+            "plugGap": {
+              "default": 0.15,
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "plugTabWidth": {
+              "default": 0.35,
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "plugTabThickness": {
+              "default": 0.2,
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "traceCut": {
+              "default": "none",
+              "type": "string",
+              "enum": [
+                "none",
+                "lined"
+              ]
+            },
+            "traceCutWidth": {
+              "default": 1,
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "squarePinBottomFace": {
+              "default": "square",
+              "type": "string",
+              "enum": [
+                "square",
+                "circular"
+              ]
             }
           },
           "required": [
@@ -121,7 +171,15 @@
             "edgeClearance",
             "minFloor",
             "landingDiameter",
-            "grid"
+            "landingMargin",
+            "grid",
+            "plugHoles",
+            "plugGap",
+            "plugTabWidth",
+            "plugTabThickness",
+            "traceCut",
+            "traceCutWidth",
+            "squarePinBottomFace"
           ],
           "additionalProperties": false
         }
@@ -258,11 +316,15 @@
                       },
                       "y": {
                         "type": "number"
+                      },
+                      "id": {
+                        "type": "string"
                       }
                     },
                     "required": [
                       "x",
-                      "y"
+                      "y",
+                      "id"
                     ],
                     "additionalProperties": false
                   }
@@ -291,6 +353,446 @@
                 "depth"
               ],
               "additionalProperties": false
+            }
+          },
+          "constraints": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "expression": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "number"
+                    },
+                    "annotation": {
+                      "type": "object",
+                      "properties": {
+                        "labelOffset": {
+                          "type": "object",
+                          "properties": {
+                            "x": {
+                              "type": "number"
+                            },
+                            "y": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "x",
+                            "y"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "lineOffset": {
+                          "type": "number"
+                        },
+                        "radius": {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "parallel"
+                    },
+                    "reference": {
+                      "type": "object",
+                      "properties": {
+                        "owner": {
+                          "type": "string",
+                          "enum": [
+                            "body",
+                            "pin",
+                            "zone"
+                          ]
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "feature": {
+                          "type": "string",
+                          "enum": [
+                            "left",
+                            "right",
+                            "bottom",
+                            "top",
+                            "midX",
+                            "midY",
+                            "edge",
+                            "circle"
+                          ]
+                        },
+                        "vertices": {
+                          "type": "array",
+                          "prefixItems": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "string"
+                            }
+                          ],
+                          "items": false,
+                          "minItems": 2,
+                          "maxItems": 2
+                        },
+                        "circleMode": {
+                          "type": "string",
+                          "enum": [
+                            "near",
+                            "center",
+                            "far"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "owner",
+                        "id",
+                        "feature"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "target": {
+                      "type": "object",
+                      "properties": {
+                        "owner": {
+                          "type": "string",
+                          "enum": [
+                            "body",
+                            "pin",
+                            "zone"
+                          ]
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "feature": {
+                          "type": "string",
+                          "enum": [
+                            "left",
+                            "right",
+                            "bottom",
+                            "top",
+                            "midX",
+                            "midY",
+                            "edge",
+                            "circle"
+                          ]
+                        },
+                        "vertices": {
+                          "type": "array",
+                          "prefixItems": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "string"
+                            }
+                          ],
+                          "items": false,
+                          "minItems": 2,
+                          "maxItems": 2
+                        },
+                        "circleMode": {
+                          "type": "string",
+                          "enum": [
+                            "near",
+                            "center",
+                            "far"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "owner",
+                        "id",
+                        "feature"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "normal": {
+                      "type": "object",
+                      "properties": {
+                        "x": {
+                          "type": "number"
+                        },
+                        "y": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "x",
+                        "y"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "side": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "const": 1
+                        },
+                        {
+                          "type": "number",
+                          "const": -1
+                        }
+                      ]
+                    },
+                    "circleSign": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "const": 1
+                        },
+                        {
+                          "type": "number",
+                          "const": -1
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "expression",
+                    "value",
+                    "kind",
+                    "reference",
+                    "target",
+                    "normal",
+                    "side"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "expression": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "number"
+                    },
+                    "annotation": {
+                      "type": "object",
+                      "properties": {
+                        "labelOffset": {
+                          "type": "object",
+                          "properties": {
+                            "x": {
+                              "type": "number"
+                            },
+                            "y": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "x",
+                            "y"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "lineOffset": {
+                          "type": "number"
+                        },
+                        "radius": {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "angular"
+                    },
+                    "zoneId": {
+                      "type": "string"
+                    },
+                    "vertices": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ],
+                      "items": false,
+                      "minItems": 3,
+                      "maxItems": 3
+                    },
+                    "origin": {
+                      "type": "object",
+                      "properties": {
+                        "x": {
+                          "type": "number"
+                        },
+                        "y": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "x",
+                        "y"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "direction": {
+                      "type": "object",
+                      "properties": {
+                        "x": {
+                          "type": "number"
+                        },
+                        "y": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "x",
+                        "y"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "orientation": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "const": 1
+                        },
+                        {
+                          "type": "number",
+                          "const": -1
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "expression",
+                    "value",
+                    "kind",
+                    "zoneId",
+                    "vertices",
+                    "origin",
+                    "direction",
+                    "orientation"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "expression": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "number"
+                    },
+                    "annotation": {
+                      "type": "object",
+                      "properties": {
+                        "labelOffset": {
+                          "type": "object",
+                          "properties": {
+                            "x": {
+                              "type": "number"
+                            },
+                            "y": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "x",
+                            "y"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "lineOffset": {
+                          "type": "number"
+                        },
+                        "radius": {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "central"
+                    },
+                    "reference": {
+                      "type": "object",
+                      "properties": {
+                        "owner": {
+                          "type": "string",
+                          "enum": [
+                            "body",
+                            "pin",
+                            "zone"
+                          ]
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "owner",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "target": {
+                      "type": "object",
+                      "properties": {
+                        "owner": {
+                          "type": "string",
+                          "enum": [
+                            "body",
+                            "pin",
+                            "zone"
+                          ]
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "owner",
+                        "id"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "expression",
+                    "value",
+                    "kind",
+                    "reference",
+                    "target"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
             }
           }
         },
@@ -691,11 +1193,15 @@
                           },
                           "y": {
                             "type": "number"
+                          },
+                          "id": {
+                            "type": "string"
                           }
                         },
                         "required": [
                           "x",
-                          "y"
+                          "y",
+                          "id"
                         ],
                         "additionalProperties": false
                       }
@@ -724,6 +1230,446 @@
                     "depth"
                   ],
                   "additionalProperties": false
+                }
+              },
+              "constraints": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "expression": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "number"
+                        },
+                        "annotation": {
+                          "type": "object",
+                          "properties": {
+                            "labelOffset": {
+                              "type": "object",
+                              "properties": {
+                                "x": {
+                                  "type": "number"
+                                },
+                                "y": {
+                                  "type": "number"
+                                }
+                              },
+                              "required": [
+                                "x",
+                                "y"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "lineOffset": {
+                              "type": "number"
+                            },
+                            "radius": {
+                              "type": "number",
+                              "exclusiveMinimum": 0
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "kind": {
+                          "type": "string",
+                          "const": "parallel"
+                        },
+                        "reference": {
+                          "type": "object",
+                          "properties": {
+                            "owner": {
+                              "type": "string",
+                              "enum": [
+                                "body",
+                                "pin",
+                                "zone"
+                              ]
+                            },
+                            "id": {
+                              "type": "string"
+                            },
+                            "feature": {
+                              "type": "string",
+                              "enum": [
+                                "left",
+                                "right",
+                                "bottom",
+                                "top",
+                                "midX",
+                                "midY",
+                                "edge",
+                                "circle"
+                              ]
+                            },
+                            "vertices": {
+                              "type": "array",
+                              "prefixItems": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "string"
+                                }
+                              ],
+                              "items": false,
+                              "minItems": 2,
+                              "maxItems": 2
+                            },
+                            "circleMode": {
+                              "type": "string",
+                              "enum": [
+                                "near",
+                                "center",
+                                "far"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "owner",
+                            "id",
+                            "feature"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "target": {
+                          "type": "object",
+                          "properties": {
+                            "owner": {
+                              "type": "string",
+                              "enum": [
+                                "body",
+                                "pin",
+                                "zone"
+                              ]
+                            },
+                            "id": {
+                              "type": "string"
+                            },
+                            "feature": {
+                              "type": "string",
+                              "enum": [
+                                "left",
+                                "right",
+                                "bottom",
+                                "top",
+                                "midX",
+                                "midY",
+                                "edge",
+                                "circle"
+                              ]
+                            },
+                            "vertices": {
+                              "type": "array",
+                              "prefixItems": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "string"
+                                }
+                              ],
+                              "items": false,
+                              "minItems": 2,
+                              "maxItems": 2
+                            },
+                            "circleMode": {
+                              "type": "string",
+                              "enum": [
+                                "near",
+                                "center",
+                                "far"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "owner",
+                            "id",
+                            "feature"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "normal": {
+                          "type": "object",
+                          "properties": {
+                            "x": {
+                              "type": "number"
+                            },
+                            "y": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "x",
+                            "y"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "side": {
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "const": 1
+                            },
+                            {
+                              "type": "number",
+                              "const": -1
+                            }
+                          ]
+                        },
+                        "circleSign": {
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "const": 1
+                            },
+                            {
+                              "type": "number",
+                              "const": -1
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "expression",
+                        "value",
+                        "kind",
+                        "reference",
+                        "target",
+                        "normal",
+                        "side"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "expression": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "number"
+                        },
+                        "annotation": {
+                          "type": "object",
+                          "properties": {
+                            "labelOffset": {
+                              "type": "object",
+                              "properties": {
+                                "x": {
+                                  "type": "number"
+                                },
+                                "y": {
+                                  "type": "number"
+                                }
+                              },
+                              "required": [
+                                "x",
+                                "y"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "lineOffset": {
+                              "type": "number"
+                            },
+                            "radius": {
+                              "type": "number",
+                              "exclusiveMinimum": 0
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "kind": {
+                          "type": "string",
+                          "const": "angular"
+                        },
+                        "zoneId": {
+                          "type": "string"
+                        },
+                        "vertices": {
+                          "type": "array",
+                          "prefixItems": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "string"
+                            }
+                          ],
+                          "items": false,
+                          "minItems": 3,
+                          "maxItems": 3
+                        },
+                        "origin": {
+                          "type": "object",
+                          "properties": {
+                            "x": {
+                              "type": "number"
+                            },
+                            "y": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "x",
+                            "y"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "direction": {
+                          "type": "object",
+                          "properties": {
+                            "x": {
+                              "type": "number"
+                            },
+                            "y": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "x",
+                            "y"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "orientation": {
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "const": 1
+                            },
+                            {
+                              "type": "number",
+                              "const": -1
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "expression",
+                        "value",
+                        "kind",
+                        "zoneId",
+                        "vertices",
+                        "origin",
+                        "direction",
+                        "orientation"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "expression": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "number"
+                        },
+                        "annotation": {
+                          "type": "object",
+                          "properties": {
+                            "labelOffset": {
+                              "type": "object",
+                              "properties": {
+                                "x": {
+                                  "type": "number"
+                                },
+                                "y": {
+                                  "type": "number"
+                                }
+                              },
+                              "required": [
+                                "x",
+                                "y"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "lineOffset": {
+                              "type": "number"
+                            },
+                            "radius": {
+                              "type": "number",
+                              "exclusiveMinimum": 0
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "kind": {
+                          "type": "string",
+                          "const": "central"
+                        },
+                        "reference": {
+                          "type": "object",
+                          "properties": {
+                            "owner": {
+                              "type": "string",
+                              "enum": [
+                                "body",
+                                "pin",
+                                "zone"
+                              ]
+                            },
+                            "id": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "owner",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "target": {
+                          "type": "object",
+                          "properties": {
+                            "owner": {
+                              "type": "string",
+                              "enum": [
+                                "body",
+                                "pin",
+                                "zone"
+                              ]
+                            },
+                            "id": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "owner",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "expression",
+                        "value",
+                        "kind",
+                        "reference",
+                        "target"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
                 }
               }
             },
@@ -774,6 +1720,6 @@
   ],
   "additionalProperties": false,
   "$id": "https://traceform.local/project.schema.json",
-  "title": "Traceform Project v1",
-  "description": "All coordinates and fabrication dimensions are in millimeters. See README for reference integrity constraints."
+  "title": "Traceform Project v2",
+  "description": "All coordinates and fabrication dimensions are in millimeters. Constraints are component-local. See README for reference integrity constraints."
 }
